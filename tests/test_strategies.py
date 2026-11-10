@@ -112,3 +112,17 @@ def test_compaction_never_edits_the_log(corpus):
     tools = [m for m in agent.messages if m["role"] == "tool"]
     assert len(tools) == 14 and all("[compacted history]" not in (m.get("content") or "") for m in agent.messages)
 
+
+def test_refold_found_is_registered_apart_from_refold_and_defaults_its_knobs():
+    from refold.registry import import_class
+    cfg = build_config("refold-found", "scripted/test")
+    fields = import_class(cfg["agent_path"]).config_class.model_fields
+    assert fields["found"].default is True and "window_unit" not in fields
+    base = import_class(build_config("refold", "scripted/test")["agent_path"]).config_class.model_fields
+    assert base["found"].default is False
+
+
+def test_refold_found_dropped_is_refold_found_with_found_keep_off():
+    from refold.registry import import_class
+    fields = import_class(build_config("refold-found-dropped", "scripted/test")["agent_path"]).config_class.model_fields
+    assert fields["found"].default is True and fields["found_keep"].default is False

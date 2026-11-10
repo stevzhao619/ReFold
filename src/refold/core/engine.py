@@ -44,6 +44,7 @@ PROMPTS: dict[str, str] = json.loads((Path(__file__).parent / "prompts.json").re
 
 # The instance templates open every reply with this sentence; the PROGRESS/STALE protocol
 # takes its place, so the model is asked for one opening, not two.
+_FOUND_MAX = 300  # characters of a FOUND line a fold note keeps
 THOUGHT_ANCHOR = "Include a THOUGHT section explaining your reasoning and what you're trying to accomplish"
 _RESTORE_MAX = 10  # steps per `restore` call
 _RESTORE_CLAUSE = re.compile(r" `restore \{\w+\}` shows (?:it|them|all of it|\{them\}) again\.")
@@ -74,15 +75,41 @@ class ReFoldKnobs(BaseModel):
     seed: int = 0
     """Seed of stale_source=random; every task and step draws from its own stream."""
 
+    # --- FOUND (strategies refold-found, refold-found-dropped): off in ReFold ---------
+    found: bool = False
+    """True: every reply also carries a `FOUND:` line, the concrete result the tool output it
+    just received taught, and a fold note keeps the FOUND lines of the steps it folds."""
+    found_keep: bool = True
+    """False (with found=True): the reply still writes FOUND and the prompt still asks for it,
+    but a fold note keeps only PROGRESS, as in ReFold. The "write it, don't keep it" control."""
 
-def prompt_layer(k: int, reversible: bool = True, window: int | None = None) -> tuple[str, str]:
+
+def with_found(protocol: str) -> str:
+    """The protocol that also asks for the FOUND line: `protocol` with the FOUND texts of
+    prompts.json inserted. Nothing else changes, so the two cannot drift apart."""
+    out = _swap(protocol, "these two lines", "these three lines")
+    out = _swap(out, "These two lines", "These three lines")
+    out = _swap(out, "or `-` if none>\n", "or `-` if none>\n" + PROMPTS["found_line"])
+    out = _swap(out, "Name steps AS SOON AS you are done with them. {window}\n",
+                "Name steps AS SOON AS you are done with them. {window}\n" + PROMPTS["found_rule"])
+    out = _swap(out, "keeps their PROGRESS lines and a", "keeps their PROGRESS lines, the FOUND lines written about them, and a")
+    return _swap(out, "  STALE: 3, 4\n", "  STALE: 3, 4\n" + PROMPTS["found_example"])
+
+
+def _swap(text: str, old: str, new: str) -> str:
+    assert text.count(old) == 1, f"the protocol no longer has exactly one {old!r}: update with_found"
+    return text.replace(old, new)
+
+
+def prompt_layer(k: int, reversible: bool = True, window: int | None = None,
+                 found: bool = False) -> tuple[str, str]:
     """(the disclosure appended to the system prompt, the protocol that replaces the
     THOUGHT item) for chunk size k. The protocol states the STALE window: k steps, or
-    `window` when it is set (0: any earlier step)."""
+    `window` when it is set (0: any earlier step). `found` asks for the FOUND line as well."""
     w = k if window is None else window
     window_text = (PROMPTS["protocol_window_any"] if w == 0 else
                    PROMPTS["protocol_window"].replace("{k}", str(w)).replace("{plural}", "" if w == 1 else "s"))
-    protocol = (PROMPTS["protocol"].replace("{restore}", PROMPTS["protocol_restore"] if reversible else "")
+    protocol = ((with_found(PROMPTS["protocol"]) if found else PROMPTS["protocol"]).replace("{restore}", PROMPTS["protocol_restore"] if reversible else "")
                 .replace("{window}", window_text))
     return PROMPTS["disclosure" if reversible else "disclosure_irreversible"], protocol
 
@@ -90,7 +117,7 @@ def prompt_layer(k: int, reversible: bool = True, window: int | None = None) -> 
 def inject_prompts(system: str, task: str, knobs) -> tuple[str, str]:
     """The prompt layer on a framework's own texts: the disclosure appended to the system
     prompt, and the PROGRESS/STALE protocol in place of the THOUGHT item (or appended)."""
-    disclosure, protocol = prompt_layer(knobs.chunk_size, knobs.reversible, knobs.stale_window)
+    disclosure, protocol = prompt_layer(knobs.chunk_size, knobs.reversible, knobs.stale_window, knobs.found)
     if protocol.strip() not in task:
         task = task.replace(THOUGHT_ANCHOR, protocol.strip(), 1) if THOUGHT_ANCHOR in task else task + "\n" + protocol
     if "[context-manager]" not in system:
@@ -122,12 +149,16 @@ class ReFoldEngine:
         self.reply_msg: list[int] = []  # step -> index of the reply that issued it
         self.progress: list[str] = []  # step -> PROGRESS of that reply ("" if it had none)
         self.has_progress: list[bool] = []  # step -> did that reply carry a PROGRESS line
+        self.found: list[str] = []  # step -> what the NEXT reply's FOUND says about its output ("" if none or `-`)
+        self.found_own: list[str] = []  # step -> FOUND line of the reply that issued it (what that reply learned)
         self.stale: set[int] = set()  # S_t
         self.agent_stale: set[int] = set()  # what the replies named, when stale_source is not `agent`
         self.folds: list[fold.Fold] = []
         self.removed: dict[int, str] = {}  # step -> "folded" | "compressed" (deduplicated) in the last prompt
         self.cwd: str = cwd
         self.labels = {"replies": 0, "progress_missing": 0, "stale_out_of_window": 0, "labels_in_command": 0}
+        if self.config.found:
+            self.labels |= {"found_text": 0, "found_dash": 0, "found_missing": 0, "found_truncated": 0}
         self.restores = dict.fromkeys(("calls", "folded", "compressed", "shown", "invalid"), 0)
         self.reruns = dict.fromkeys(("folded", "folded_identical", "compressed", "compressed_identical"), 0)
 
@@ -157,6 +188,27 @@ class ReFoldEngine:
         while len(self.progress) < t:  # every turn of this reply shares its PROGRESS
             self.progress.append(progress or "")
             self.has_progress.append(progress is not None)
+        if self.config.found:
+            found = parse.parse_found(content)
+            if found is None and labels:
+                found = parse.parse_found(labels, max_lines=len(labels.splitlines()))
+            self.labels["found_missing"] += found is None
+            self.labels["found_dash"] += found == ""
+            if found:
+                self.labels["found_text"] += 1
+                if len(found) > _FOUND_MAX:
+                    self.labels["found_truncated"] += 1
+                    found = found[:_FOUND_MAX - 1] + "…"
+            first = t - len(commands)  # this reply's first step; its FOUND describes the output of the reply before it
+            while len(self.found_own) < t:
+                self.found_own.append(found or "")
+            while len(self.found) < t:  # filled in by the next reply
+                self.found.append("")
+            prev = self.reply_msg[first - 1] if first > 0 else None
+            for s in range(first - 1, -1, -1):
+                if self.reply_msg[s] != prev:
+                    break
+                self.found[s] = found or ""
         w = self.config.chunk_size if self.config.stale_window is None else self.config.stale_window
         first = t - len(commands)  # this reply's first step; its own steps have no output yet
         lo, hi = (0 if w == 0 else first - w), first - 1  # the last w steps before this reply
@@ -172,7 +224,8 @@ class ReFoldEngine:
                 task = hashlib.sha1((self.messages[1].get("content") or "").encode()).hexdigest()
                 window = random.Random(f"{self.config.seed}:{task}:{t}").sample(window, min(len(new), len(window)))
             self.stale.update(window)
-        self.folds = fold.folds(self.turns, self.stale, self.progress, self.boundary(), self.notes)
+        self.folds = fold.folds(self.turns, self.stale, self.progress, self.boundary(), self.notes, self.reply_msg,
+                                self.found if self.config.found and self.config.found_keep else None)
 
     def _turn(self, index: int, cmd: str, obs: str) -> Turn:
         """Which dedup key a turn gets: a file read, a search, or a test run."""
@@ -319,13 +372,15 @@ class ReFoldEngine:
         if not self.has_progress or self.has_progress[-1]:
             return -1, ""
         misses = len(self.has_progress) - 1 - max((i for i, ok in enumerate(self.has_progress) if ok), default=-1)
-        text = PROMPTS["remind_gentle"] if misses <= 1 else PROMPTS["remind_harsh"].format(misses=misses)
+        suffix = "_found" if self.config.found else ""
+        text = PROMPTS["remind_gentle" + suffix] if misses <= 1 else PROMPTS["remind_harsh" + suffix].format(misses=misses)
         return self.tool_msg[-1], text
 
     # ------------------------------------------------------------------ record
     def record(self) -> dict:
         """What ReFold did on this task (a trajectory's info.refold)."""
         return {"steps": len(self.turns), "stale": sorted(self.stale), **self.labels,
+                **({"found": self.found, "found_own": self.found_own} if self.config.found else {}),
                 **({"agent_stale": sorted(self.agent_stale)} if self.config.stale_source != "agent" else {}),
                 "folds": [{"start": f.start, "end": f.end, "note": f.note} for f in self.folds],
                 "restores": dict(self.restores), "refetches": dict(self.reruns)}

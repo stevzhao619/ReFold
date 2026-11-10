@@ -112,7 +112,7 @@ def test_errors_are_one_line_not_a_traceback(capsys):
     assert "--compact runs a strategy beneath compaction" in capsys.readouterr().err
 
 
-def test_strategies_lists_base_compact_and_refold(capsys):
+def test_strategies_lists_base_compact_refold_and_refold_found(capsys):
     main(["strategies"])
     names = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
-    assert names == ["base", "compact", "refold"]
+    assert names == ["base", "compact", "refold", "refold-found", "refold-found-dropped"]

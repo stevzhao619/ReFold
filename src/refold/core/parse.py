@@ -378,6 +378,27 @@ def parse_progress(content: str | None) -> str | None:
     return None
 
 
+_FOUND_RE = re.compile(r"\s*`?FOUND`?\s*:\s*(.*)", re.IGNORECASE)
+
+
+def parse_found(content: str | None, max_lines: int = 5) -> str | None:
+    """FOUND_t: the text on a `FOUND:` line among the first `max_lines` non-empty lines of the
+    reply, or None if there is none. The colon is required (a sentence that opens with
+    "Found" is not the line); `-`, `none`, `[]` and `n/a` give "" (the reply found nothing)."""
+    seen = 0
+    for line in (content or "").splitlines():
+        if not line.strip():
+            continue
+        seen += 1
+        if seen > max_lines:
+            break
+        m = _FOUND_RE.match(line)
+        if m:
+            body = m.group(1).strip().strip("`").strip()
+            return "" if body.lower() in ("none", "-", "[]", "n/a", "") else body
+    return None
+
+
 def parse_stale(content: str | None, max_lines: int = 4) -> list[int]:
     """STALE_t: step ids on a `STALE:` line among the first `max_lines` non-empty lines. A
     range such as `25-28` names every step in it, not only its two ends.

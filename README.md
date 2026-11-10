@@ -78,6 +78,34 @@ the harness of every experiment in the paper, next to the two strategies it is c
 | `compact` | the full history until the prompt reaches 75% of the budget; then an extra model call summarises the oldest part |
 | `refold` | the history rendered by ReFold |
 | `refold` + `--compact` | ReFold inside the window, compaction beyond it (compact + ReFold) |
+| `refold-found` | `refold`, plus a `FOUND:` line per reply that fold notes keep (experimental, see below) |
+| `refold-found-dropped` | `refold-found`, but fold notes drop the `FOUND:` lines (control) |
+
+### FOUND (experimental)
+
+A fold note keeps a step's `PROGRESS:` line, which says what the step *did*, not what its output
+*told* the model. `refold-found` asks for a third reply line,
+`FOUND: <the concrete result the output you just received gave you>`: the constant, score, path
+or conclusion itself, or `-` if there was nothing new. The line is written in the reply after
+the output it describes, stored with that step, and printed in the note when the step is folded
+(`  found: [4] retry limit is 5, in conf/app.yaml · [5] ...`, at most 300 characters each, once
+per reply).
+
+`refold-found-dropped` is the control: the same prompt, the same FOUND line written and recorded
+in `info.refold.found`, but not put in the notes, so a difference to `refold-found` comes from
+what the notes keep, not from asking for the line.
+
+```bash
+refold run --strategy refold-found         --model <model> --benchmark tbench21 -o runs/found
+refold run --strategy refold-found-dropped --model <model> --benchmark tbench21 -o runs/found-dropped
+```
+
+The knobs behind them are `found` and `found_keep` of `ReFoldKnobs`
+(`-c found=true -c found_keep=false` on any `refold` run). The `refold` strategy and its
+prompts are unchanged when they are off. The STALE window is main's: the last k steps before
+the reply's first call. (The FOUND runs reported in [#3](https://github.com/YupengSu/ReFold/issues/3)
+counted the window in replies; every reply in them made a single call, where the two windows are
+equivalent.)
 
 ## Setup
 

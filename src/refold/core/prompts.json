@@ -20,5 +20,11 @@
  "restore_head": "[context-manager] step {step} as first shown: its agent message, command and tool observation. Re-run the command for its current state.",
  "restore_shown": "[context-manager] step {step} is shown in full above: nothing to restore.",
  "restore_invalid": "[context-manager] no step {step}: steps so far are 0-{last}.",
- "restore_cap": "[context-manager] at most {max} steps per restore: the others were not restored."
+ "restore_cap": "[context-manager] at most {max} steps per restore: the others were not restored.",
+ "remind_gentle_found": "[context-manager] Your last response did not start with the three metadata lines. Start this one with them, then continue:\n  PROGRESS: <one short line on what THIS step does>\n  STALE: <step numbers you are done with, or `-`>\n  FOUND: <the concrete result the output you just received gave you, or `-`>",
+ "remind_harsh_found": "[context-manager] FORMAT VIOLATION ({misses} in a row): every response MUST start with the PROGRESS, STALE and FOUND lines. Write them FIRST, before anything else, right now.",
+ "note_found": "  found: {found}",
+ "found_line": "  FOUND: <the concrete result the output you just received gave you: the actual constant, score, path or conclusion, on one line; `-` if nothing new>\n",
+ "found_rule": "FOUND is written for your future self: it is kept with the step whose output you just read, and once that step is folded only its PROGRESS line and that FOUND line survive, so put the value itself there (for example `FOUND: retry limit is 5, set in conf/app.yaml; test_parse fails with KeyError: id`), not a description of having looked.\n",
+ "found_example": "  FOUND: main() reads argv[1] as the input path; buffer size is 4096\n"
 }

@@ -34,9 +34,10 @@ class Fold:
 
 
 def folds(turns: list[Turn], stale: set[int], progress: list[str], boundary: int,
-          notes: dict[str, str]) -> list[Fold]:
+          notes: dict[str, str], reply_of: list[int] | None = None, found: list[str] | None = None) -> list[Fold]:
     """The maximal runs of steps in `stale`, cut at the boundary. Rebuilt from S_t every
-    step, so a run that grows as the boundary advances gets one note, not two."""
+    step, so a run that grows as the boundary advances gets one note, not two. `found` (step ->
+    its FOUND line) is given for refold-found; `reply_of` (step -> its reply) keeps one FOUND per reply."""
     n, horizon = len(turns), boundary - 1
     out, i = [], 0
     while i < n:
@@ -52,6 +53,11 @@ def folds(turns: list[Turn], stale: set[int], progress: list[str], boundary: int
             note = notes["note_fold"].format(
                 steps=f"step{'s' if i != end else ''} {ids}", ids=ids, them="them" if i != end else "it",
                 progress=" · ".join(s for s in progress[i:end + 1] if s).rstrip(". ") or notes["no_progress"])
+            if found is not None:  # FOUND lines (once per reply), tagged with the step whose output they describe
+                kept = [f"[{s}] {found[s]}" for s in range(i, end + 1)
+                        if found[s] and (s == i or reply_of is None or reply_of[s] != reply_of[s - 1])]
+                if kept:
+                    note = f"{note}\n" + notes["note_found"].format(found=" · ".join(kept))
             detail = details(turns[i:end + 1])
             out.append(Fold(i, end, f"{note}\n{detail}" if detail else note))
         i = j + 1

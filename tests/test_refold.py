@@ -497,3 +497,121 @@ def test_all_stale_names_every_step_in_the_window(corpus):
     script = [read(0), read(1), read(2), read(3), ("PROGRESS: done\nSTALE: -", "echo x"), *filler(2)]
     assert run(script, corpus, stale_source="all").stale == set(range(6))  # all but the last step, never named
     assert "agent_stale" not in run(script, corpus).serialize()["info"]["refold"]
+
+
+# --------------------------------------------------------------- the FOUND experiment (refold-found)
+def found_read(i, found="-"):
+    return (f"PROGRESS: read module {i}\nSTALE: -\nFOUND: {found}", f"cat mod{i:02d}.py")
+
+
+def test_parse_found_needs_the_colon_and_only_scans_the_top():
+    from refold.core.parse import parse_found
+    assert parse_found("PROGRESS: x\nSTALE: -\nFOUND: c=2.5, r=0.8\nthinking") == "c=2.5, r=0.8"
+    assert parse_found("PROGRESS: x\nSTALE: -\nFOUND: -") == "" and parse_found("FOUND: none") == ""
+    assert parse_found("PROGRESS: x\nSTALE: -\nFound the bug in line 3\n") is None  # a sentence, not the line
+    assert parse_found("a\nb\nc\nd\ne\nFOUND: too late") is None
+    assert parse_found(None) is None and parse_found("no header") is None
+
+
+def test_found_off_leaves_refolds_prompt_note_and_record_alone(corpus):
+    from refold.core.engine import prompt_layer
+    a = run([read(0), read(1), read(2), ("PROGRESS: done\nSTALE: 1, 2\nFOUND: ignored", "echo x"), *filler(6)], corpus)
+    assert "found" not in a.engine.record() and "found_text" not in a.labels
+    assert "FOUND" not in a.messages[0]["content"] + a.messages[1]["content"]
+    assert not any("  found: " in text(p) for p in a.model.prompts)
+    assert prompt_layer(3) == prompt_layer(3, True, None, False)
+
+
+def about(n, stale="-", command=None):
+    """Reply n+1 of a script: its FOUND line describes the output of step n (the one before it)."""
+    return (f"PROGRESS: p{n + 1}\nSTALE: {stale}\nFOUND: ABOUT-{n}", command or f"echo out{n + 1}")
+
+
+def test_a_fold_note_keeps_the_found_line_that_was_written_about_the_step(corpus):
+    """Step s's output is first described by reply s+1's FOUND, so folding step s keeps that
+    line, not the FOUND line of reply s (which describes step s-1)."""
+    script = [("PROGRESS: p0\nSTALE: -\nFOUND: -", "echo out0"), about(0), about(1), about(2, "1, 2"),
+              *[about(3 + j) for j in range(5)]]
+    agent = run(script, corpus, found=True)
+    note = tool_msg(agent.model.prompts[-1], 3)
+    assert "steps 1-2 folded: p1 · p2." in note
+    assert "\n  found: [1] ABOUT-1 · [2] ABOUT-2\n" in note
+    assert "ABOUT-0" not in note and "ABOUT-3" not in note  # about step 0 (visible) and step 3 (not folded)
+    assert agent.engine.found[:4] == ["ABOUT-0", "ABOUT-1", "ABOUT-2", "ABOUT-3"]
+    assert agent.engine.found_own[:4] == ["", "ABOUT-0", "ABOUT-1", "ABOUT-2"]  # what each reply itself wrote
+    assert agent.labels["found_text"] == 8 and agent.labels["found_dash"] == 1 and agent.labels["found_missing"] == 0
+    assert "FOUND: <the concrete result" in agent.messages[1]["content"]
+    assert "last 3 steps" in agent.messages[1]["content"]
+
+
+def test_a_reply_with_two_calls_gets_one_found_line_for_both_steps(corpus):
+    script = [("PROGRESS: p0\nSTALE: -\nFOUND: -", "echo out0"),
+              ("PROGRESS: p1\nSTALE: -\nFOUND: ABOUT-0", ["cat mod00.py", "cat mod01.py"]),  # steps 1, 2
+              ("PROGRESS: p2\nSTALE: -\nFOUND: ABOUT-BOTH", "echo out3"),  # step 3
+              ("PROGRESS: p3\nSTALE: 1, 2\nFOUND: ABOUT-3", "echo out4"),
+              *[about(4 + j) for j in range(5)]]
+    agent = run(script, corpus, found=True)
+    assert agent.engine.found[:4] == ["ABOUT-0", "ABOUT-BOTH", "ABOUT-BOTH", "ABOUT-3"]
+    note = tool_msg(agent.model.prompts[-1], 3)
+    assert "steps 1-2 folded" in note and note.count("ABOUT-BOTH") == 1 and "[1] ABOUT-BOTH" in note
+
+
+def test_a_long_found_line_is_cut_in_the_note(corpus):
+    script = [found_read(0, "x" * 400), read(1), read(2), ("PROGRESS: done\nSTALE: 0, 1, 2", "echo x"), *filler(6)]
+    agent = run(script, corpus, found=True, stale_window=3)
+    assert agent.labels["found_truncated"] == 1 and len(agent.engine.found_own[0]) == 300
+
+
+def test_the_found_reminder_asks_for_three_lines(corpus):
+    script = [found_read(0), ("no header", "echo a"), found_read(1)]
+    agent = run(script, corpus, found=True)
+    assert agent.model.prompts[2][-1]["content"].endswith("\n\n" + PROMPTS["remind_gentle_found"])
+    assert "FOUND" in PROMPTS["remind_gentle_found"] and "FOUND" in PROMPTS["remind_harsh_found"]
+
+
+def test_found_keep_off_asks_and_records_found_but_the_note_keeps_only_progress(corpus):
+    script = [("PROGRESS: p0\nSTALE: -\nFOUND: -", "echo out0"), about(0), about(1), about(2, "1, 2"),
+              *[about(3 + j) for j in range(5)]]
+    kept = run(script, corpus, found=True)
+    dropped = run(script, corpus, found=True, found_keep=False)
+    plain = run(script, corpus)  # ReFold: no FOUND, window in steps
+    assert dropped.messages[:2] == kept.messages[:2]  # the same system and task prompt, FOUND line and all
+    assert dropped.engine.found == kept.engine.found and dropped.engine.labels == kept.engine.labels
+    note = tool_msg(dropped.model.prompts[-1], 3)
+    assert "found:" not in note and "ABOUT-1" not in note
+    assert note == tool_msg(kept.model.prompts[-1], 3).replace("\n  found: [1] ABOUT-1 · [2] ABOUT-2", "")
+    assert [m["role"] for m in dropped.model.prompts[-1]] == [m["role"] for m in kept.model.prompts[-1]]
+    assert dropped.engine.folds == plain.engine.folds  # the notes are ReFold's own
+
+
+def test_found_protocol_is_the_protocol_plus_the_found_texts(corpus):
+    from refold.core.engine import prompt_layer, with_found
+    _, plain = prompt_layer(3)
+    _, found = prompt_layer(3, found=True)
+    assert found == with_found(PROMPTS["protocol"]).replace("{restore}", PROMPTS["protocol_restore"]).replace(
+        "{window}", PROMPTS["protocol_window"].replace("{k}", "3").replace("{plural}", "s"))
+    # taking the FOUND texts out again gives back the protocol, word for word
+    undone = (found.replace(PROMPTS["found_line"], "").replace(PROMPTS["found_rule"], "").replace(PROMPTS["found_example"], "")
+              .replace("these three lines", "these two lines").replace("These three lines", "These two lines")
+              .replace(", the FOUND lines written about them, and a", " and a"))
+    assert undone == plain and "FOUND" not in undone and "FOUND" in found
+
+
+def test_found_is_read_from_the_labels_a_reply_put_in_its_command(corpus):
+    """A reply may open its command with the PROGRESS/STALE/FOUND lines instead of its text (parse.split_labels)."""
+    from refold.core.engine import ReFoldEngine, ReFoldKnobs
+    def play(replies):
+        """(reply text, labels) per reply, one call each; returns the engine after the last"""
+        hist = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+        eng = ReFoldEngine(ReFoldKnobs(found=True), lambda: hist)
+        for i, (text, labels) in enumerate(replies):
+            hist += [{"role": "assistant", "content": text, "tool_calls": []}, {"role": "tool", "content": f"out{i}"}]
+            eng.observe([f"echo {i}"], [hist[-1]], labels=labels)
+        return eng
+
+    eng = play([("no header here", "PROGRESS: p0\nSTALE: -\nFOUND: -"), ("still none", "PROGRESS: p1\nSTALE: -\nFOUND: ABOUT-LABELS")])
+    assert eng.found == ["ABOUT-LABELS", ""] and eng.found_own == ["", "ABOUT-LABELS"]
+    assert eng.labels["found_text"] == 1 and eng.labels["found_dash"] == 1 and eng.labels["found_missing"] == 0
+    # the reply's text wins over its labels; a reply with neither is counted as missing
+    eng2 = play([("no header", ""), ("PROGRESS: x\nSTALE: -\nFOUND: FROM-TEXT", "FOUND: FROM-LABELS")])
+    assert eng2.found == ["FROM-TEXT", ""] and eng2.labels["found_missing"] == 1 and eng2.labels["found_text"] == 1
